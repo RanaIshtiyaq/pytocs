@@ -1,0 +1,190 @@
+# Simple GCode to Arduino hex format converter.
+# It only understands G00 and G01 codes, nothing fancy!
+#
+# It will automatically scale the object to the full 12 bit
+# range for my Arduino laser project, to change that
+# you have to modify the scale in createObject().
+#
+# Typical files I worked with have been generated with
+# http://ncplot.com/stickfont/stickfont.htm (StickFont 1.1)
+#
+# Usage: python convertGCode.py inputfile.nc outputfile.cpp
+
+import math
+import sys
+import matplotlib.pyplot as plt
+#from plotData_laserSimulator import getAxisDatas
+import time
+
+
+
+def createObject(name, cmds,minx, miny, maxx, maxy):
+	# minx = miny = 10000000
+	# maxx = maxy = 0
+	string = ""
+	# for cmd in cmds:
+	# 	if cmd[0] == 2:
+	# 		minx = min(minx, cmd[1])
+	# 		miny = min(miny, cmd[2])
+	# 		maxx = max(maxx, cmd[1])
+	# 		maxy = max(maxy, cmd[2])
+
+	string += "draw_" + name + " = [\n";   
+	# string += "const unsigned short draw_" + name + "[] PROGMEM = {\n";   ........per Arduino
+	# string += "const uint32_t PROGMEM draw_" + name + "[] = {\n";    ...........per ESP32
+	laserState = False
+
+	biggestSide = max(maxx - minx, maxy - miny)
+	# scale to the laser range
+	scale = 4095. / biggestSide;
+	# print ("bounding box x: ", minx, maxx)
+	# print ("bounding box y: ", miny, maxy)
+	# print ("scale: ", scale)
+	for cmd in cmds:
+		if cmd[0] == 0: laserState = False
+		if cmd[0] == 1: laserState = True
+		if cmd[0] == 2:
+			x = int(math.floor((cmd[1] - minx) * scale))
+			y = int(math.floor((cmd[2] - miny) * scale))
+			if laserState:
+				x += 0x8000
+			string += hex(x) + "," + hex(y) + ",\n"
+	string += "];\n"   
+	# string += "};\n"    ...............per ESP32
+	return string
+
+
+def run(input, output):
+	result = ""
+	minx = miny = 10000000
+	maxx = maxy = 0
+	f = open(input)
+	lines = f.readlines()
+	posx = posy = 0.
+	cmds = []
+	drawing = False
+	stat = 1
+	layer = 1
+	out_dict = {}
+	o = open(output, "w")
+	for l in lines:
+		if stat == 1:
+			if l.startswith("G0"):
+				cmds.append((0,))
+				drawing = True
+			elif l.startswith("G1"):
+				cmds.append((1,))
+				drawing = False
+			stat = 0
+
+		if l.startswith("G0"):
+			if l.find('X') >= 0 and l.find('Y') >= 0:
+				if drawing == False:
+					cmds.append((0,))
+					drawing = True
+				# print (l)   ..............comentato
+				parts = l.split("X")
+				newposx = parts[1].split(" ")[0]
+				parts = l.split("Y")
+				newposy = parts[1].split(" ")[0]
+				newposy = newposy.replace("\n", "")
+				cmds.append((2, float(newposx), float(newposy)))
+				minx = min(minx, float(newposx))
+				miny = min(miny, float(newposy))
+				maxx = max(maxx, float(newposx))
+				maxy = max(maxy, float(newposy))
+				# print (newposx, newposy)   .............comentato
+
+		elif l.startswith("G1"):
+			if l.find('X') >= 0 and l.find('Y') >= 0:
+				if drawing == True:
+					cmds.append((1,))
+					drawing = False
+				# print (l)   ..........comentato
+				parts = l.split("X")
+				newposx = parts[1].split(" ")[0]
+				parts = l.split("Y")
+				newposy = parts[1].split(" ")[0]
+				newposy = newposy.replace("\n", "")
+				cmds.append((2, float(newposx), float(newposy)))
+				minx = min(minx, float(newposx))
+				miny = min(miny, float(newposy))
+				maxx = max(maxx, float(newposx))
+				maxy = max(maxy, float(newposy))
+				# print (newposx, newposy)   .............comentato
+		elif l.find(";MESH:NONMESH") >= 0:
+			# print (cmds)   ...............comentato
+			# result = createObject("layer"+str(layer), cmds,minx, miny, maxx, maxy)
+			# o.write(result)
+			out_dict["layer"+str(layer)] = cmds
+			layer+=1
+			stat = 1
+			cmds = []
+
+	# result = createObject("layer" + str(layer), cmds, minx, miny, maxx, maxy)
+	# o.write(result)
+	out_dict["layer" + str(layer)] = cmds
+	for i in range(layer):
+		cmds = out_dict["layer" + str(i+1)]
+		result = createObject("layer" + str(i+1), cmds, minx, miny, maxx, maxy)
+		o.write(result)
+	o.close()
+
+def getsegment(x1, y1, x2, y2):
+    return [x1, x2], [y1, y2]	
+
+def getAxisDatas(data):
+    length_data = int(len(data) / 2)
+    x1 = None
+    y1 = None
+    x2 = None
+    y2 = None
+    for i in range(0, length_data):
+        if data[i * 2] >= 0x8000:
+            # print("laser on")
+            x, y = data[i * 2] - 0x8000, data[i * 2 + 1]
+        else:
+            # print("laser off")
+            x, y = data[i * 2], data[i * 2 + 1]
+            x1, x2, y1, y2 = None, None, None, None
+
+        if x1 is None and y1 is None:
+            x1 = x
+            y1 = y
+        else:
+            x2 = x
+            y2 = y
+
+        if x1 is not None and x2 is not None and y1 is not None and y2 is not None:
+            point1, point2 = getsegment(x1, y1, x2, y2)
+            plt.plot(point1, point2)
+            x1 = x2
+            y1 = y2
+
+
+if __name__ == "__main__":
+	# if len(sys.argv) < 3:
+	# 	print "Usage: layer_to_object_converter_test.py inputfile.gcode outputfile.py"
+	# else:
+	# 	run(sys.argv[1], sys.argv[2])
+	run("UMS5_Sphera.gcode", "outputfile.py")
+	starttime = time.time()
+	cnt = 0
+	with open('outputfile.py') as fp:
+		for line in fp:
+			if "draw_layer" in line:
+				cnt += 1
+	print(cnt)
+	from outputfile import *
+	plt.ion()
+	for i in range(cnt):
+		exec("q=draw_layer" + str(i + 1))
+		print(i + 1)
+		plt.clf()
+		plt.axis([0, 4096, 0, 4096])
+		getAxisDatas(q)
+		plt.draw()
+		plt.pause(.01)
+	plt.show()
+	print((time.time() - starttime), " seconds elapsed")
+	
